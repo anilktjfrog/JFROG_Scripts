@@ -1,0 +1,82 @@
+name: Publish NPM Package to GitHub Packages and JFROG
+
+on:
+  workflow_dispatch: # Trigger the workflow manually
+
+jobs:
+  build-and-github-publish:
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+    env:
+      OIDC_PROVIDER: "jfrog-npm-github-oidc-provider" # OIDC provider name for JFrog
+      PLATFORM_REPO: "githubnpm-npm"
+      NPM_SCOPE: "@koerber-design-system" # NPM scope for the package
+      NPM_REGISTRY: "https://npm.pkg.github.com/" # NPM registry URL
+      NODE_VERSION: "20.x" # Node.js version to use
+    defaults:
+      run:
+        working-directory: ./package # All subsequent 'run' commands will execute in this directory
+
+    permissions:
+      contents: read # Allow reading repository content
+      packages: write # Allow writing to GitHub Packages
+      id-token: write # Required for OIDC authentication with JFrog
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # Action to check out your repository code
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4 # Action to set up Node.js environment
+        with:
+          node-version: ${{ env.NODE_VERSION }} # Specify the Node.js version to use
+          registry-url: ${{ env.NPM_REGISTRY }} # Configure npm to use GitHub Packages registry
+          # IMPORTANT: The 'scope' here MUST match the scope in your package.json's 'name' field.
+          # For example, if your package name is "@koerber-design-system/my-lib", then scope is @koerber-design-system.
+          scope: ${{ env.NPM_SCOPE }} # Set the NPM scope for the package
+
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v3
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+        with:
+          oidc-provider-name: ${{ env.OIDC_PROVIDER }}
+
+      - name: Set CLI Config
+        run: jf npm-config --global=true --repo-resolve=${{ env.PLATFORM_REPO }} --repo-deploy=${{ env.PLATFORM_REPO }}
+
+      - name: Install dependencies
+        run: npm install # Install all project dependencies
+
+      - name: Test project
+        # Assuming you have a 'test' script defined in your package.json
+        run: npm test # Run the test script for your project
+
+      - name: Pack NPM package
+        # This command creates the .tgz archive of your package without publishing.
+        run: npm pack
+
+      - name: Publish package
+        run: npm publish # Publish the package to the configured registry
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find NPM package archive and upload to JFrog
+        id: upload_to_jfrog
+        run: |
+          ls -lart
+          PACKAGE_NAME=$(node -p "require('./package.json').name" | sed 's/${{ env.NPM_SCOPE }}\///g')
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          NPM_ARCHIVE_NAME="$(echo "${{ env.NPM_SCOPE }}" | sed 's/@//')-${PACKAGE_NAME}-${PACKAGE_VERSION}.tgz"
+          echo "Package Name: ${PACKAGE_NAME}"
+          echo "Package Version: ${PACKAGE_VERSION}"
+          echo "Looking for NPM archive: ${NPM_ARCHIVE_NAME}"
+          if [ -f "$NPM_ARCHIVE_NAME" ]; then
+              echo "Found ${NPM_ARCHIVE_NAME}. Uploading to JFrog Artifactory..."
+              echo "jf rt upload \"${NPM_ARCHIVE_NAME}\" \"${{ env.PLATFORM_REPO }}/${{ env.NPM_SCOPE }}/${PACKAGE_NAME}/${PACKAGE_VERSION}/${PACKAGE_NAME}-${PACKAGE_VERSION}.tgz\""
+              jf rt upload "${NPM_ARCHIVE_NAME}" "${{ env.PLATFORM_REPO }}/${{ env.NPM_SCOPE }}/${PACKAGE_NAME}/${PACKAGE_VERSION}/${PACKAGE_NAME}-${PACKAGE_VERSION}.tgz"
+
+              echo "JFrog upload complete."
+          else
+              echo "Error: NPM archive ${NPM_ARCHIVE_NAME} not found. Ensure 'npm pack' ran successfully."
+              exit 1
+          fi
